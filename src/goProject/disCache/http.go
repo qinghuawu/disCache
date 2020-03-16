@@ -2,6 +2,7 @@ package disCache
 
 import (
 	"fmt"
+	"goProject/disCache/singleflight"
 	"hash/crc32"
 	"io/ioutil"
 	"log"
@@ -15,7 +16,8 @@ type HTTPPool struct {
 	serverUrl string
 	basePath  string
 	urls      []string
-	locCache *Cache
+	locCache  *Cache
+	loader    *singleflight.Group
 }
 
 func NewHTTPPool(serverUrl string, urls []string, locCache *Cache) *HTTPPool {
@@ -23,7 +25,8 @@ func NewHTTPPool(serverUrl string, urls []string, locCache *Cache) *HTTPPool {
 		serverUrl: serverUrl,
 		basePath:  defaultPath,
 		urls:      urls,
-		locCache: locCache,
+		locCache:  locCache,
+		loader:    &singleflight.Group{},
 	}
 }
 
@@ -46,7 +49,7 @@ func (p *HTTPPool) GetRemotely(key string, requestID int) (ByteView, error) {
 	return ByteView{bytes}, nil
 }
 
-func (p *HTTPPool) Get(key string) (ByteView, error) {
+func (p *HTTPPool) Get(key string) (interface{}, error) {
 	id := p.locCache.GetNodeID(key)
 	slot := crc32.ChecksumIEEE([]byte(key)) % uint32(len(p.locCache.slots))
 	fmt.Printf("This server is Node [%v]; Key [%v] is on Slot [%v] on Node [%v]\n", p.locCache.id, key, slot, id)
@@ -54,6 +57,11 @@ func (p *HTTPPool) Get(key string) (ByteView, error) {
 		return p.locCache.GetLocally(key)
 	}
 	return p.GetRemotely(key, id)
+}
+
+func (p *HTTPPool) load(key string) (ByteView, error){
+	a, b := p.loader.Do(key, p.Get)
+	return a.(ByteView), b
 }
 
 func (p *HTTPPool) Log(format string, v ...interface{}) {
@@ -79,7 +87,7 @@ func (p *HTTPPool) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	key := parts[2]
-	if v, err := p.Get(key); err != nil {
+	if v, err := p.load(key); err != nil {
 		fmt.Println("HTTPError", v, err)
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 	} else {
